@@ -16,6 +16,18 @@ const serviceSupabase = config.SUPABASE_SERVICE_ROLE_KEY
   ? createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false }, realtime: { transport: WebSocket as any } })
   : null;
 
+const REQUEST_DISCOVERY_WINDOW_MS = 30 * 60 * 1000;
+const EARTH_RADIUS_KM = 6371;
+
+function distanceKm(fromLat: number, fromLng: number, toLat: number, toLng: number): number {
+  const radians = (value: number) => value * Math.PI / 180;
+  const dLat = radians(toLat - fromLat);
+  const dLng = radians(toLng - fromLng);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(radians(fromLat)) * Math.cos(radians(toLat)) * Math.sin(dLng / 2) ** 2;
+  return EARTH_RADIUS_KM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 await app.register(helmet, { contentSecurityPolicy: false });
 await app.register(cors, { origin: corsOrigins, credentials: true });
 await app.register(rateLimit, { max: config.RATE_LIMIT_MAX, timeWindow: config.RATE_LIMIT_WINDOW });
@@ -60,9 +72,57 @@ app.register(async (api) => {
     const parsed = coordinates.safeParse({ latitude: Number(query.latitude), longitude: Number(query.longitude) });
     if (!parsed.success) throw app.httpErrors.badRequest('Invalid coordinates');
     const radius = Math.min(Math.max(Number(query.radius_km ?? 25), 1), 50);
-    const { data, error } = await request.supabase.rpc('get_nearby_map_items', { p_lat: parsed.data.latitude, p_lng: parsed.data.longitude, p_radius_km: radius });
-    if (error) throw app.httpErrors.internalServerError('Unable to load nearby items');
-    return { items: data ?? [] };
+    const discoveryDb = serviceSupabase ?? request.supabase;
+    const requestCutoff = new Date(Date.now() - REQUEST_DISCOVERY_WINDOW_MS).toISOString();
+    const now = new Date().toISOString();
+    const [openRequests, availableFood] = await Promise.all([
+      discoveryDb
+        .from('meal_requests')
+        .select('id,user_id,meals,timing,status,latitude,longitude,created_at,updated_at')
+        .eq('status', 'open')
+        .gt('created_at', requestCutoff)
+        .order('created_at', { ascending: false })
+        .limit(200),
+      discoveryDb
+        .from('food_donations')
+        .select('id,user_id,food_name,meals,latitude,longitude,expires_at,created_at')
+        .eq('status', 'available')
+        .gt('expires_at', now)
+        .order('created_at', { ascending: false })
+        .limit(200),
+    ]);
+    if (openRequests.error || availableFood.error) throw app.httpErrors.internalServerError('Unable to load nearby items');
+
+    const nearbyRequests = (openRequests.data ?? []).map((item) => ({
+      item_type: 'request' as const,
+      item_id: item.id,
+      user_id: item.user_id,
+      title: 'Meal request',
+      meals: item.meals,
+      timing: item.timing,
+      status: item.status,
+      latitude: Math.round(item.latitude * 1000) / 1000,
+      longitude: Math.round(item.longitude * 1000) / 1000,
+      created_at: item.created_at,
+      updated_at: item.updated_at,
+      expires_at: new Date(new Date(item.created_at).getTime() + REQUEST_DISCOVERY_WINDOW_MS).toISOString(),
+    }));
+    const nearbyFood = (availableFood.data ?? []).map((item) => ({
+      item_type: 'food' as const,
+      item_id: item.id,
+      user_id: item.user_id,
+      title: item.food_name,
+      meals: item.meals,
+      latitude: Math.round(item.latitude * 1000) / 1000,
+      longitude: Math.round(item.longitude * 1000) / 1000,
+      expires_at: item.expires_at,
+      created_at: item.created_at,
+    }));
+    const items = [...nearbyRequests, ...nearbyFood]
+      .map((item) => ({ ...item, distance_km: distanceKm(parsed.data.latitude, parsed.data.longitude, item.latitude, item.longitude) }))
+      .filter((item) => item.distance_km <= radius)
+      .sort((a, b) => a.distance_km - b.distance_km);
+    return { items };
   });
 
   api.post('/meal-requests', async (request, reply) => {
