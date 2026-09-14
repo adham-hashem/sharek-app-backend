@@ -12,6 +12,9 @@ import './types.js';
 
 const app = Fastify({ logger: { level: config.NODE_ENV === 'production' ? 'info' : 'debug' }, bodyLimit: 256 * 1024, trustProxy: config.TRUST_PROXY });
 const publicSupabase = createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, { auth: { persistSession: false }, realtime: { transport: WebSocket as any } });
+const serviceSupabase = config.SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false }, realtime: { transport: WebSocket as any } })
+  : null;
 
 await app.register(helmet, { contentSecurityPolicy: false });
 await app.register(cors, { origin: corsOrigins, credentials: true });
@@ -168,8 +171,21 @@ app.register(async (api) => {
   api.post('/food-donations', async (request, reply) => {
     const parsed = foodDonationInput.safeParse(request.body);
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.flatten());
-    const { data, error } = await request.supabase.from('food_donations').insert({ ...parsed.data, user_id: request.user.id, status: 'available' }).select().single();
-    if (error) throw app.httpErrors.internalServerError('Unable to publish food');
+    const db = serviceSupabase ?? request.supabase;
+    const { data: profile, error: profileError } = await db
+      .from('profiles')
+      .select('role')
+      .eq('id', request.user.id)
+      .maybeSingle();
+    if (profileError) throw app.httpErrors.internalServerError('Unable to verify account role');
+    if (!profile || !['donor', 'charity', 'restaurant', 'hotel'].includes(profile.role)) {
+      throw app.httpErrors.forbidden('Only donors can publish food');
+    }
+    const { data, error } = await db.from('food_donations').insert({ ...parsed.data, user_id: request.user.id, status: 'available' }).select().single();
+    if (error) {
+      request.log.error({ err: error }, 'food publish failed');
+      throw app.httpErrors.internalServerError('Unable to publish food');
+    }
     return reply.code(201).send(data);
   });
 
@@ -267,18 +283,25 @@ app.register(async (api) => {
 
   api.get('/history', async (request) => {
     const uid = request.user.id;
+    const db = serviceSupabase ?? request.supabase;
     const [requests, foodClaims, helperMatches] = await Promise.all([
-      request.supabase.from('meal_requests').select('*').eq('user_id', uid).order('created_at', { ascending: false }).limit(100),
-      request.supabase.from('food_claims').select('*').eq('claimer_id', uid).order('created_at', { ascending: false }).limit(100),
-      request.supabase.from('matches').select('*').eq('helper_id', uid).order('created_at', { ascending: false }).limit(100),
+      db.from('meal_requests').select('*').eq('user_id', uid).order('created_at', { ascending: false }).limit(100),
+      db.from('food_claims').select('*').eq('claimer_id', uid).order('created_at', { ascending: false }).limit(100),
+      db.from('matches').select('*').eq('helper_id', uid).order('created_at', { ascending: false }).limit(100),
     ]);
-    if ([requests, foodClaims, helperMatches].some((result) => result.error)) throw app.httpErrors.internalServerError('Unable to load history');
+    if ([requests, foodClaims, helperMatches].some((result) => result.error)) {
+      request.log.error({ errors: [requests.error, foodClaims.error, helperMatches.error].filter(Boolean) }, 'history load failed');
+      throw app.httpErrors.internalServerError('Unable to load history');
+    }
 
     const requestIds = (requests.data ?? []).map((item) => item.id);
     const requesterMatches = requestIds.length
-      ? await request.supabase.from('matches').select('*').in('request_id', requestIds).order('created_at', { ascending: false }).limit(100)
+      ? await db.from('matches').select('*').in('request_id', requestIds).order('created_at', { ascending: false }).limit(100)
       : { data: [], error: null };
-    if (requesterMatches.error) throw app.httpErrors.internalServerError('Unable to load history');
+    if (requesterMatches.error) {
+      request.log.error({ err: requesterMatches.error }, 'requester history load failed');
+      throw app.httpErrors.internalServerError('Unable to load history');
+    }
 
     const matches = [...(helperMatches.data ?? []), ...(requesterMatches.data ?? [])]
       .filter((match, index, all) => all.findIndex((candidate) => candidate.id === match.id) === index)
