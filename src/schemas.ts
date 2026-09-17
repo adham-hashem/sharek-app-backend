@@ -11,6 +11,7 @@ export const foodDonationInput = coordinates.extend({
   food_name: z.string().trim().min(2).max(120),
   description: z.string().trim().max(1000).default(''),
   image_url: z.string().url().nullable().optional(),
+  image_urls: z.array(z.string().url()).max(8).optional(),
   meals: z.number().int().min(1).max(1000),
   pickup_start: z.string().datetime(),
   pickup_end: z.string().datetime(),
