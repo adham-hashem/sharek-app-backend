@@ -35,5 +35,15 @@ export function isAdmin(user: User): boolean {
 export async function requireAdmin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (!request.user || !request.supabase) await requireUser(request, reply);
   if (reply.sent) return;
-  if (!isAdmin(request.user)) await reply.code(403).send({ error: 'FORBIDDEN', message: 'Administrator access is required' });
+  if (isAdmin(request.user)) return;
+
+  const { data, error } = await request.supabase
+    .from('profiles')
+    .select('is_admin')
+    .eq('id', request.user.id)
+    .maybeSingle();
+
+  if (error || data?.is_admin !== true) {
+    await reply.code(403).send({ error: 'FORBIDDEN', message: 'Administrator access is required' });
+  }
 }
