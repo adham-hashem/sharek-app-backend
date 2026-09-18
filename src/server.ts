@@ -63,24 +63,24 @@ function appRedirectUrl(path: string): string {
   return `${productionOrigin.replace(/\/$/, '')}${path}`;
 }
 
-async function resolveLoginPhone(identifier: string): Promise<string | null> {
+async function resolveLoginEmail(identifier: string): Promise<string | null> {
   const normalized = normalizeIdentifier(identifier);
-  if (!serviceSupabase) return normalized.includes('@') ? null : normalized;
-  if (!normalized.includes('@')) return normalized;
+  if (!serviceSupabase) return normalized.includes('@') ? normalized : null;
+  if (normalized.includes('@')) return normalized;
   const { data } = await serviceSupabase
     .from('profiles')
-    .select('phone')
-    .eq('email', normalized)
+    .select('email')
+    .eq('phone', normalized)
     .maybeSingle();
-  return typeof data?.phone === 'string' && data.phone ? data.phone : null;
+  return typeof data?.email === 'string' && data.email.includes('@') ? data.email : null;
 }
 
 app.post('/auth/password-login', async (request) => {
   const parsed = passwordLoginInput.safeParse(request.body);
   if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.flatten());
-  const phone = await resolveLoginPhone(parsed.data.identifier);
-  if (!phone) throw app.httpErrors.unauthorized('Invalid login credentials');
-  const { data, error } = await publicSupabase.auth.signInWithPassword({ phone, password: parsed.data.password });
+  const email = await resolveLoginEmail(parsed.data.identifier);
+  if (!email) throw app.httpErrors.unauthorized('Invalid login credentials');
+  const { data, error } = await publicSupabase.auth.signInWithPassword({ email, password: parsed.data.password });
   if (error || !data.session) throw app.httpErrors.unauthorized('Invalid login credentials');
   return { session: data.session, user: data.user };
 });
