@@ -58,3 +58,12 @@ export const mealTypeUpdateInput = z.object({
   is_active: z.boolean().optional(),
 }).strict();
 export const currencyRateInput = z.object({ rate: z.number().finite().positive().max(1_000_000) }).strict();
+
+export const passwordLoginInput = z.object({
+  identifier: z.string().trim().min(3).max(254),
+  password: z.string().min(6).max(128),
+}).strict();
+
+export const recoveryStartInput = z.object({
+  identifier: z.string().trim().min(3).max(254),
+}).strict();

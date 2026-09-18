@@ -7,7 +7,7 @@ import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
 import { config, corsOrigins } from './config.js';
 import { requireAdmin, requireUser } from './auth.js';
-import { coordinates, currencyRateInput, deliveryStatusInput, donationIntentInput, foodDonationInput, generalDonationInput, locationInput, mealRequestInput, mealTypeUpdateInput, messageInput, pushDeviceInput, ratingInput } from './schemas.js';
+import { coordinates, currencyRateInput, deliveryStatusInput, donationIntentInput, foodDonationInput, generalDonationInput, locationInput, mealRequestInput, mealTypeUpdateInput, messageInput, passwordLoginInput, pushDeviceInput, ratingInput, recoveryStartInput } from './schemas.js';
 import './types.js';
 
 const app = Fastify({ logger: { level: config.NODE_ENV === 'production' ? 'info' : 'debug' }, bodyLimit: 256 * 1024, trustProxy: config.TRUST_PROXY });
@@ -34,6 +34,83 @@ await app.register(rateLimit, { max: config.RATE_LIMIT_MAX, timeWindow: config.R
 await app.register(sensible);
 
 app.get('/healthz', async () => ({ status: 'ok', service: 'sharek-api', time: new Date().toISOString() }));
+
+function normalizeIdentifier(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.includes('@')) return trimmed.toLowerCase();
+  return trimmed.replace(/[^\d+]/g, '');
+}
+
+function maskEmail(email: string): string {
+  const [name, domain] = email.split('@');
+  if (!name || !domain) return '';
+  const head = name.slice(0, 2);
+  const tail = name.length > 4 ? name.slice(-1) : '';
+  return `${head}${'*'.repeat(Math.max(3, name.length - head.length - tail.length))}${tail}@${domain}`;
+}
+
+function maskPhone(phone: string): string {
+  const compact = phone.replace(/\s+/g, '');
+  if (compact.length <= 6) return `${compact.slice(0, 2)}***`;
+  return `${compact.slice(0, 4)}***${compact.slice(-3)}`;
+}
+
+function appRedirectUrl(path: string): string {
+  const productionOrigin = corsOrigins.find((origin) => origin.startsWith('https://sharek-app-frontend.vercel.app'))
+    ?? corsOrigins.find((origin) => origin.startsWith('https://'))
+    ?? corsOrigins[0]
+    ?? 'https://sharek-app-frontend.vercel.app';
+  return `${productionOrigin.replace(/\/$/, '')}${path}`;
+}
+
+async function resolveLoginPhone(identifier: string): Promise<string | null> {
+  const normalized = normalizeIdentifier(identifier);
+  if (!serviceSupabase) return normalized.includes('@') ? null : normalized;
+  if (!normalized.includes('@')) return normalized;
+  const { data } = await serviceSupabase
+    .from('profiles')
+    .select('phone')
+    .eq('email', normalized)
+    .maybeSingle();
+  return typeof data?.phone === 'string' && data.phone ? data.phone : null;
+}
+
+app.post('/auth/password-login', async (request) => {
+  const parsed = passwordLoginInput.safeParse(request.body);
+  if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.flatten());
+  const phone = await resolveLoginPhone(parsed.data.identifier);
+  if (!phone) throw app.httpErrors.unauthorized('Invalid login credentials');
+  const { data, error } = await publicSupabase.auth.signInWithPassword({ phone, password: parsed.data.password });
+  if (error || !data.session) throw app.httpErrors.unauthorized('Invalid login credentials');
+  return { session: data.session, user: data.user };
+});
+
+app.post('/auth/recovery/start', async (request) => {
+  const parsed = recoveryStartInput.safeParse(request.body);
+  if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.flatten());
+  const normalized = normalizeIdentifier(parsed.data.identifier);
+  let email: string | null = null;
+  let phone: string | null = null;
+
+  if (serviceSupabase) {
+    const query = serviceSupabase.from('profiles').select('email, phone').limit(1);
+    const { data } = normalized.includes('@')
+      ? await query.eq('email', normalized).maybeSingle()
+      : await query.eq('phone', normalized).maybeSingle();
+    email = typeof data?.email === 'string' && data.email.includes('@') ? data.email : null;
+    phone = typeof data?.phone === 'string' ? data.phone : null;
+  }
+
+  if (email) {
+    await publicSupabase.auth.resetPasswordForEmail(email, { redirectTo: appRedirectUrl('/reset-password') }).catch(() => undefined);
+  }
+
+  return {
+    ok: true,
+    recoveryEmail: email ? maskEmail(email) : null,
+    phone: phone ? maskPhone(phone) : null,
+  };
+});
 
 app.register(async (api) => {
   api.addHook('preHandler', requireUser);
