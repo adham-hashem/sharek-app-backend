@@ -102,7 +102,13 @@ app.post('/auth/recovery/start', async (request) => {
   }
 
   if (email) {
-    await publicSupabase.auth.resetPasswordForEmail(email, { redirectTo: appRedirectUrl('/reset-password') }).catch(() => undefined);
+    const { error: resetError } = await publicSupabase.auth.resetPasswordForEmail(email, {
+      redirectTo: appRedirectUrl('/reset-password'),
+    });
+    if (resetError) {
+      request.log.error({ err: resetError, redirectTo: appRedirectUrl('/reset-password') }, 'Supabase password recovery email failed');
+      throw app.httpErrors.badGateway('Password recovery email could not be sent');
+    }
   }
 
   return {
@@ -148,7 +154,7 @@ app.register(async (api) => {
     const query = request.query as Record<string, string | undefined>;
     const parsed = coordinates.safeParse({ latitude: Number(query.latitude), longitude: Number(query.longitude) });
     if (!parsed.success) throw app.httpErrors.badRequest('Invalid coordinates');
-    const radius = Math.min(Math.max(Number(query.radius_km ?? 25), 1), 50);
+    const radius = Math.min(Math.max(Number(query.radius_km ?? 50), 1), 100);
     const discoveryDb = serviceSupabase ?? request.supabase;
     const requestCutoff = new Date(Date.now() - REQUEST_DISCOVERY_WINDOW_MS).toISOString();
     const now = new Date().toISOString();
